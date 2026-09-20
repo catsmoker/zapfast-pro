@@ -12,6 +12,8 @@ pub struct AppDirs {
     pub config: PathBuf,
     pub state: PathBuf,
     pub cache: PathBuf,
+    /// User-chosen attachment folder. `None` uses the default cache dir.
+    pub custom_media_dir: Option<PathBuf>,
 }
 
 impl AppDirs {
@@ -24,6 +26,7 @@ impl AppDirs {
                     config: fallback.join("zapfast-config"),
                     state: fallback.join("zapfast-state"),
                     cache: fallback.join("zapfast-cache"),
+                    custom_media_dir: None,
                 }
             }
         }
@@ -39,6 +42,7 @@ impl AppDirs {
                 .map(|path| path.to_path_buf())
                 .unwrap_or_else(|| project.data_local_dir().to_path_buf()),
             cache: project.cache_dir().to_path_buf(),
+            custom_media_dir: None,
         })
     }
 
@@ -75,6 +79,7 @@ impl AppDirs {
             config: root.join("config"),
             state: root.join("state"),
             cache: root.join("cache"),
+            custom_media_dir: None,
         }
     }
 
@@ -106,6 +111,31 @@ impl AppDirs {
     /// Downloaded attachments keyed by message id.
     pub fn media_cache_dir(&self) -> PathBuf {
         self.cache.join("media")
+    }
+
+    /// Effective attachment folder: the custom dir when set, else the cache.
+    /// New downloads and outbound copies land here; logout only clears the
+    /// cache dir, so custom folders survive unlinking.
+    pub fn media_dir(&self) -> PathBuf {
+        self.custom_media_dir
+            .clone()
+            .unwrap_or_else(|| self.media_cache_dir())
+    }
+
+    /// Stores a custom attachment folder. `None` and the default cache dir
+    /// both reset to the cache.
+    pub fn set_custom_media_dir(&mut self, dir: Option<PathBuf>) {
+        self.custom_media_dir = match dir {
+            Some(dir) if dir == self.media_cache_dir() => None,
+            dir => dir,
+        };
+    }
+
+    /// Whether a folder may hold attachments. Folders inside the cache tree
+    /// are rejected: logout wipes the default media and avatar caches and
+    /// must never touch user data.
+    pub fn custom_media_dir_valid(&self, dir: &Path) -> bool {
+        !dir.starts_with(&self.cache)
     }
 
     /// Profile pictures keyed by chat.
@@ -311,11 +341,13 @@ mod tests {
             config: root.join("old/data"),
             state: root.join("old/data"),
             cache: root.join("old/cache"),
+            custom_media_dir: None,
         };
         let new = AppDirs {
             config: root.join("new/data"),
             state: root.join("new/data"),
             cache: root.join("new/cache"),
+            custom_media_dir: None,
         };
         old.ensure().unwrap();
         std::fs::write(old.session_db(), b"session").unwrap();
@@ -337,6 +369,32 @@ mod tests {
         std::fs::remove_file(root.join("blocked")).unwrap();
         new.adopt(&old).unwrap();
         assert_eq!(std::fs::read(new.session_db()).unwrap(), b"session");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn media_dir_uses_custom_path_when_configured() {
+        let root = root("media-dir");
+        let dirs = AppDirs::under(&root);
+        assert_eq!(dirs.media_dir(), dirs.media_cache_dir());
+        let custom = root.join("attachments");
+        let mut dirs = dirs;
+        dirs.set_custom_media_dir(Some(custom.clone()));
+        assert_eq!(dirs.media_dir(), custom);
+        // Selecting the default cache folder resets to the cache.
+        dirs.set_custom_media_dir(Some(dirs.media_cache_dir()));
+        assert_eq!(dirs.custom_media_dir, None);
+        assert_eq!(dirs.media_dir(), dirs.media_cache_dir());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn custom_media_folders_must_live_outside_the_cache() {
+        let root = root("media-dir-valid");
+        let dirs = AppDirs::under(&root);
+        assert!(dirs.custom_media_dir_valid(&root.join("attachments")));
+        assert!(!dirs.custom_media_dir_valid(&dirs.media_cache_dir().join("mine")));
+        assert!(!dirs.custom_media_dir_valid(&dirs.avatar_cache_dir()));
         std::fs::remove_dir_all(root).unwrap();
     }
 }

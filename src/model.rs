@@ -430,6 +430,15 @@ fn with_caption(label: &str, caption: &Option<String>) -> String {
     }
 }
 
+/// Binary 64 MiB cap for incoming attachment downloads (67,108,864 bytes).
+/// Spelled MiB, not MB, because 64 MB usually means 64,000,000 bytes.
+pub const ATTACHMENT_DOWNLOAD_LIMIT: u64 = 64 * 1024 * 1024;
+
+/// Whether WhatsApp metadata already declares an attachment too large to fetch.
+pub fn attachment_too_large(size: u64) -> bool {
+    size > ATTACHMENT_DOWNLOAD_LIMIT
+}
+
 /// Attachment metadata, download state, and optional local file. Download keys
 /// remain in the archive's raw message.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -486,6 +495,8 @@ impl Contact {
 pub enum Page {
     Chats,
     Settings,
+    /// Experimental tools: activity tracker and call diagnostics.
+    Advanced,
 }
 
 /// The tabs of the picker above the composer.
@@ -622,6 +633,18 @@ pub enum Action {
     OpenFile(PathBuf),
     OpenUrl(String),
     CopyText(String),
+    /// Opens the folder picker for downloaded attachments.
+    PickMediaDir,
+    /// Resets the attachment folder to the default cache directory.
+    ResetMediaDir,
+    /// Starts presence monitoring for the number in the activity input.
+    StartActivityMonitor,
+    /// Stops presence monitoring and clears the session.
+    StopActivityMonitor,
+    /// Toggles desktop notifications for activity state changes.
+    SetActivityNotify(bool),
+    /// Rebuilds the call diagnostics snapshot from local observation.
+    RefreshCallDiagnostics,
     /// Starts a reply to a message in the open chat.
     Reply(String),
     CancelReply,
@@ -728,6 +751,7 @@ pub enum Action {
     InstallUpdate,
     SetTheme(crate::settings::ThemeChoice),
     SetCustomTheme(String),
+    SetFont(Option<String>),
     ReloadThemes,
     OpenThemesFolder,
     SettingsChanged,
@@ -795,6 +819,13 @@ mod tests {
             path: None,
             state: MediaState::Idle,
         }
+    }
+
+    #[test]
+    fn attachment_limit_includes_the_boundary() {
+        assert_eq!(ATTACHMENT_DOWNLOAD_LIMIT, 67_108_864);
+        assert!(!attachment_too_large(ATTACHMENT_DOWNLOAD_LIMIT));
+        assert!(attachment_too_large(ATTACHMENT_DOWNLOAD_LIMIT + 1));
     }
 
     #[test]

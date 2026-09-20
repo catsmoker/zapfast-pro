@@ -1,6 +1,6 @@
 //! User preferences stored in JSON.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -29,6 +29,8 @@ impl ThemeChoice {
 #[serde(default)]
 pub struct Settings {
     pub theme: ThemeChoice,
+    /// Installed font family, or bundled Inter when unset or unavailable.
+    pub font_family: Option<String>,
     /// Filename of the selected local JSON palette.
     pub custom_theme: Option<String>,
     #[serde(
@@ -78,12 +80,15 @@ pub struct Settings {
     pub voice_speed: f32,
     /// Also add saved contacts to the phone's address book.
     pub save_contacts_to_phone: bool,
+    /// Custom attachment folder. `None` uses the default cache directory.
+    pub custom_media_dir: Option<PathBuf>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             theme: ThemeChoice::Dark,
+            font_family: None,
             custom_theme: None,
             custom_theme_cache: None,
             system_theme_cache: None,
@@ -104,6 +109,7 @@ impl Default for Settings {
             download_updates_automatically: false,
             names_from_contacts: true,
             save_contacts_to_phone: true,
+            custom_media_dir: None,
             voice_speed: 1.0,
         }
     }
@@ -192,11 +198,27 @@ mod tests {
     }
 
     #[test]
+    fn custom_media_dir_defaults_to_none_and_round_trips() {
+        assert_eq!(Settings::default().custom_media_dir, None);
+        let dir =
+            std::env::temp_dir().join(format!("zapfast-media-settings-{}", std::process::id()));
+        let path = dir.join("settings.json");
+        let settings = Settings {
+            custom_media_dir: Some(dir.join("attachments")),
+            ..Settings::default()
+        };
+        settings.save(&path).expect("saves");
+        assert_eq!(Settings::load(&path), settings);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn round_trips_through_disk() {
         let dir = std::env::temp_dir().join(format!("zapfast-settings-{}", std::process::id()));
         let path = dir.join("settings.json");
         let settings = Settings {
             zoom: 1.25,
+            font_family: Some("Example Sans".into()),
             enter_sends: false,
             voice_speed: 1.5,
             ..Settings::default()

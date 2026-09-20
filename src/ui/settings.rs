@@ -86,6 +86,47 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                             }
                         });
                     });
+                    widgets::setting_row(ui, &palette, "Font", "Used throughout the interface and messages. Unavailable fonts use Inter.", |ui| {
+                        ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
+                            let selected = app.settings.font_family.as_deref().unwrap_or("Inter (default)");
+                            let response = egui::ComboBox::from_id_salt("appearance_font")
+                                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                                .selected_text(" ")
+                                .width(200.0_f32.min(ui.available_width()))
+                                .height(300.0)
+                                .show_ui(ui, |ui| {
+                                    ui.add(egui::TextEdit::singleline(&mut app.font_search)
+                                        .hint_text("Search fonts")
+                                        .desired_width(180.0));
+                                    if theme_option(ui, &palette, "Inter (default)", app.settings.font_family.is_none()) {
+                                        app.actions.push(Action::SetFont(None));
+                                        ui.close();
+                                    }
+                                    let query = app.font_search.trim().to_lowercase();
+                                    let mut matches = 0;
+                                    for family in crate::system_fonts::families().filter(|name| query.is_empty() || name.to_lowercase().contains(&query)) {
+                                        matches += 1;
+                                        if theme_option(ui, &palette, family, app.settings.font_family.as_deref() == Some(family)) {
+                                            app.actions.push(Action::SetFont(Some(family.to_owned())));
+                                            ui.close();
+                                        }
+                                    }
+                                    if matches == 0 {
+                                        widgets::rich_text(ui, "No matching fonts", theme::regular(13.0), palette.secondary);
+                                    }
+                                });
+                            let rect = response.response.rect;
+                            let text = widgets::line(ui, selected, theme::regular(14.0), palette.text, rect.width() - 36.0, 1);
+                            text.paint(ui, egui::pos2(rect.left() + 8.0, rect.center().y - text.size().y / 2.0), palette.text);
+                            response.response.widget_info(|| {
+                                let mut info = egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, ui.is_enabled(), "Font");
+                                info.current_text_value = Some(selected.to_owned());
+                                info
+                            });
+                            widgets::rich_text(ui, "Hello, world! 👋", theme::regular(14.0), palette.text);
+                            widgets::rich_text(ui, "Bold text 0123456789", theme::bold(14.0), palette.text);
+                        });
+                    });
                     widgets::setting_row(
                         ui,
                         &palette,
@@ -116,7 +157,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     };
                     toggle(ui, app, "Send read receipts", receipts_note, |settings| &mut settings.send_read_receipts);
                     toggle(ui, app, "Show when you are typing", "", |settings| &mut settings.send_typing);
-                    toggle(ui, app, "Download attachments automatically", "Download pictures, videos, voice messages, and documents up to 64 MB when they enter view. When off, click a file to download it.", |settings| &mut settings.auto_download);
+                    toggle(ui, app, "Download attachments automatically", "Download pictures, videos, voice messages, and documents up to 64 MiB when they enter view. Larger files stay on click-to-download and are refused. When off, click a file to download it.", |settings| &mut settings.auto_download);
                     toggle(ui, app, "Show sender pictures in every chat", "WhatsApp shows them in groups only.", |settings| &mut settings.show_sender_pictures);
                     toggle(ui, app, "Names from your address book", "Prefer saved contact names. When off, prefer public WhatsApp profile names. This applies throughout the app.", |settings| &mut settings.names_from_contacts);
                     toggle(ui, app, "Save contacts to the phone's address book", "Also add contacts saved here to your phone's address book. When off, they remain WhatsApp contacts. Names sync to linked devices either way.", |settings| &mut settings.save_contacts_to_phone);
@@ -190,13 +231,31 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                             }
                         },
                     );
-                    let media = app.dirs.media_cache_dir();
+                    let media = app.dirs.media_dir();
+                    let custom = app.settings.custom_media_dir.is_some();
                     widgets::setting_row(
                         ui,
                         &palette,
                         "Downloaded attachments",
                         &media.display().to_string(),
                         |ui| {
+                            if theme::soft_button(ui, &palette, None, "Change", false)
+                                .clicked()
+                            {
+                                app.actions.push(Action::PickMediaDir);
+                            }
+                            if custom
+                                && theme::soft_button(
+                                    ui,
+                                    &palette,
+                                    Some(Icon::Refresh),
+                                    "Reset",
+                                    false,
+                                )
+                                .clicked()
+                            {
+                                app.actions.push(Action::ResetMediaDir);
+                            }
                             if theme::soft_button(ui, &palette, Some(Icon::ExternalLink), "Open folder", false).clicked() {
                                 let _ = std::fs::create_dir_all(&media);
                                 app.actions.push(Action::OpenFile(media.clone()));
@@ -209,6 +268,19 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                             app.actions.push(Action::OpenFile(log.clone()));
                         }
                     });
+
+                    section(ui, app, "Advanced Tools");
+                    widgets::setting_row(
+                        ui,
+                        &palette,
+                        "Experimental tools",
+                        "Device Activity Tracker and Call Network Diagnostics. Both are opt-in and session-only.",
+                        |ui| {
+                            if theme::soft_button(ui, &palette, Some(Icon::Monitor), "Open tools", false).clicked() {
+                                app.actions.push(Action::Open(Page::Advanced));
+                            }
+                        },
+                    );
 
                     section(ui, app, "About");
                     widgets::setting_row(

@@ -13,7 +13,7 @@ ZapFast follows each platform's conventions. On Linux:
 | Settings | `~/.config/zapfast/settings.json` | Yes, you lose preferences |
 | Message archive | `~/.local/state/zapfast/archive.db` | Yes; only history available from WhatsApp can be restored |
 | Session keys | `~/.local/state/zapfast/session.db` | Yes; you must link again |
-| Attachments | `~/.cache/zapfast/media/` | Yes; available files download again when viewed |
+| Attachments | `~/.cache/zapfast/media/` by default | Yes; available files download again when viewed |
 | Profile pictures | `~/.cache/zapfast/avatars/` | Always |
 | Stickers | `~/.cache/zapfast/stickers/` | Always |
 | GIF search stills | `~/.cache/zapfast/gifs/` | Always |
@@ -24,6 +24,9 @@ Back up the archive if you need its history. WhatsApp sends only recent
 history to a new device, although ZapFast can request some older messages from
 the phone. Clearing the media cache makes ZapFast download attachments again.
 Expired attachments may still be available through the phone.
+Settings → Files can point attachments at a custom folder outside the cache;
+new downloads land there, existing files stay where they are, and unlinking
+leaves the custom folder alone.
 
 On macOS, settings, state, and the logs are in
 `~/Library/Application Support/me.paolino.zapfast` and the caches in
@@ -44,8 +47,8 @@ Changes on the Settings page are saved to `settings.json` immediately:
 
 - **Theme**: light, dark, or follow the system.
 - **Enter sends**: swap Enter and Shift+Enter.
-- **Download attachments automatically**: download files up to 64 MB when
-  they enter view, or only when clicked.
+- **Download attachments automatically**: download files up to 64 MiB when
+  they enter view, or only when clicked. Larger files are refused.
 - **Show sender pictures**: avatars next to group messages.
 - **Names from your address book**: use contact names everywhere. When off,
   prefer public profile names.

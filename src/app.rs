@@ -7,8 +7,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use crate::activity::ActivityTracker;
 use crate::audio::{Player, Recorder};
 use crate::backend::{Backend, Command, Event, LinkStatus, Waker};
+use crate::call_diagnostics::CallDiagnostics;
 use crate::model::{
     Action, Chat, ChatFilter, ChatId, Contact, Content, Delivery, Dialog, Gif, GifError, Media,
     MediaState, Message, Page, PickerTab, StickerPack, Toast, ToastKind,
@@ -107,6 +109,7 @@ pub struct Presence {
 pub struct App {
     pub dirs: AppDirs,
     pub settings: Settings,
+    pub font_search: String,
     settings_dirty: bool,
     last_settings_save: Instant,
     pub backend: Backend,
@@ -156,6 +159,10 @@ pub struct App {
     /// Active typers and their latest event time by chat.
     pub typing: HashMap<ChatId, Vec<(String, Instant)>>,
     pub presence: HashMap<String, Presence>,
+    /// Opt-in presence monitor (Advanced Tools, session-only).
+    pub activity: ActivityTracker,
+    /// Local-only call diagnostics snapshot, rebuilt on demand.
+    pub call_diag: Option<CallDiagnostics>,
     /// Whether account privacy disables direct-chat read receipts.
     pub account_receipts_off: bool,
     avatars: HashMap<String, Option<PathBuf>>,
@@ -351,6 +358,7 @@ impl App {
         let mut app = Self {
             dirs,
             settings,
+            font_search: String::new(),
             settings_dirty: false,
             last_settings_save: Instant::now(),
             backend,
@@ -385,6 +393,8 @@ impl App {
             search_hits: Vec::new(),
             typing: HashMap::new(),
             presence: HashMap::new(),
+            activity: ActivityTracker::default(),
+            call_diag: None,
             account_receipts_off: false,
             avatars: HashMap::new(),
             avatar_requests: HashSet::new(),
@@ -570,6 +580,32 @@ impl App {
         );
     }
 
+    /// Desktop notification for a monitored activity state change. Clicking
+    /// opens the contact's chat, like message notifications do.
+    fn notify_activity_change(&mut self, id: &str, state: crate::activity::ActivityState) {
+        if !self.activity.notify_on_change || !self.settings.notifications {
+            return;
+        }
+        if self.page == Page::Advanced {
+            return;
+        }
+        let Some(target) = self.activity.target.clone() else {
+            return;
+        };
+        if target.id != id {
+            return;
+        }
+        let waker = self.waker.clone();
+        self.notifications.show(
+            format!("{} is now {}", target.label, state.label()),
+            "Device Activity Tracker (Experimental)".to_owned(),
+            None,
+            id.to_owned(),
+            std::sync::Arc::clone(&self.notification_opens),
+            move || waker.wake(),
+        );
+    }
+
     /// Initializes a newly created window.
     pub fn attach(&mut self, ctx: &egui::Context) {
         // Register transcript copy formatting once per egui context.
@@ -585,7 +621,7 @@ impl App {
         ctx.add_plugin(crate::ui::conversation::SelectionLeash::new(
             std::sync::Arc::clone(&self.selection_view),
         ));
-        crate::theme::install(ctx);
+        crate::theme::install(ctx, self.settings.font_family.as_deref());
         // Use a faster wheel speed for short chat rows.
         ctx.options_mut(|options| options.input_options.line_scroll_speed = 120.0);
         // Load and index the color emoji font outside the frame loop.
@@ -1066,6 +1102,7 @@ impl App {
                         self.stage_files(paths);
                     }
                 }
+                Event::MediaDirChanged(dir) => self.apply_media_dir(dir),
                 Event::PollCreated { chat, error } => {
                     self.poll_creating = false;
                     if let Some(error) = error {
@@ -1107,10 +1144,11 @@ impl App {
                     sender,
                     composing,
                 } => {
-                    let typers = self.typing.entry(chat).or_default();
+                    let typers = self.typing.entry(chat.clone()).or_default();
                     typers.retain(|(who, _)| *who != sender);
                     if composing {
                         typers.push((sender, Instant::now()));
+                        self.activity.note_typing(&chat, crate::util::now());
                     }
                 }
                 Event::Presence {
@@ -1118,7 +1156,12 @@ impl App {
                     online,
                     last_seen,
                 } => {
-                    self.presence.insert(id, Presence { online, last_seen });
+                    self.presence
+                        .insert(id.clone(), Presence { online, last_seen });
+                    let now = crate::util::now();
+                    if let Some(state) = self.activity.note_presence(&id, online, now) {
+                        self.notify_activity_change(&id, state);
+                    }
                 }
                 Event::Avatar { id, full, path } => {
                     if full {
@@ -1263,6 +1306,14 @@ impl App {
                 if let Some(open) = self.open_chat.clone() {
                     self.ensure_loaded(&open);
                 }
+                // Presence subscriptions die with the connection; resume
+                // explicit activity monitoring on the fresh link.
+                if self.activity.monitoring()
+                    && let Some(target) = self.activity.target.clone()
+                {
+                    self.backend
+                        .send(Command::TrackPresence { chat: target.id });
+                }
             }
             LinkStatus::LoggedOut => {
                 self.poll_voting.clear();
@@ -1328,6 +1379,68 @@ impl App {
                 media.state = MediaState::Failed(notice);
             }
         }
+    }
+
+    /// Applies the effective attachment folder from the backend: updates
+    /// settings and directories, then repoints loaded messages by file name.
+    /// Rows whose files still exist keep their paths; nothing is cleared.
+    fn apply_media_dir(&mut self, dir: Option<PathBuf>) {
+        self.dirs.set_custom_media_dir(dir);
+        self.settings.custom_media_dir = self.dirs.custom_media_dir.clone();
+        self.mark_settings_dirty();
+        let dir = self.dirs.media_dir();
+        for conversation in self.conversations.values_mut() {
+            for message in &mut conversation.messages {
+                let Some(media) = message.content.media_mut() else {
+                    continue;
+                };
+                let Some(path) = media.path.clone() else {
+                    continue;
+                };
+                if path.exists() {
+                    continue;
+                }
+                let candidate = path.file_name().map(|name| dir.join(name));
+                if candidate
+                    .as_ref()
+                    .is_some_and(|candidate| candidate.exists())
+                {
+                    media.path = candidate;
+                }
+            }
+        }
+    }
+
+    /// Starts opt-in presence monitoring for the activity input number.
+    fn start_activity_monitor(&mut self) {
+        let Some(id) = crate::activity::parse_monitor_target(&self.activity.input) else {
+            self.toast_error("Enter a phone number with at least 7 digits");
+            return;
+        };
+        let own = self.me.as_deref().and_then(crate::model::phone_of);
+        if own.is_some() && own == crate::model::phone_of(&id) {
+            self.toast_error("You cannot monitor your own number");
+            return;
+        }
+        let known = self.contacts.get(&id).and_then(|contact| {
+            contact
+                .full_name
+                .clone()
+                .or_else(|| contact.push_name.clone())
+        });
+        let label = crate::activity::label_for(&id, known.as_deref());
+        let now = crate::util::now();
+        if !self.activity.start(
+            crate::activity::MonitoredTarget {
+                id: id.clone(),
+                label: label.clone(),
+            },
+            now,
+        ) {
+            return;
+        }
+        self.backend.send(Command::TrackPresence { chat: id });
+        self.toast(format!("Monitoring {label}"));
     }
 
     fn ensure_loaded(&mut self, chat: &str) {
@@ -1936,6 +2049,24 @@ impl App {
             Action::LoadOlder(chat) => self.load_older(&chat),
             Action::FetchOlder(chat) => self.fetch_older(&chat),
             Action::Download { chat, message } => {
+                let too_large = self
+                    .conversations
+                    .get(&chat)
+                    .and_then(|conversation| conversation.message(&message))
+                    .and_then(|message| message.content.media())
+                    .is_some_and(|media| crate::model::attachment_too_large(media.size));
+                if too_large {
+                    if let Some(media) = self
+                        .conversations
+                        .get_mut(&chat)
+                        .and_then(|conversation| conversation.message_mut(&message))
+                        .and_then(|message| message.content.media_mut())
+                    {
+                        media.state =
+                            MediaState::Failed("Attachment is larger than 64 MiB".to_owned());
+                    }
+                    return;
+                }
                 if let Some(media) = self
                     .conversations
                     .get_mut(&chat)
@@ -2026,6 +2157,19 @@ impl App {
                 if let Some(chat) = self.open_chat.clone() {
                     self.backend.send(Command::PickFiles(chat));
                 }
+            }
+            Action::PickMediaDir => self.backend.send(Command::PickMediaDir),
+            Action::ResetMediaDir => self.backend.send(Command::SetMediaDir(None)),
+            Action::StartActivityMonitor => self.start_activity_monitor(),
+            Action::StopActivityMonitor => {
+                self.activity.stop();
+                self.toast("Stopped monitoring");
+            }
+            Action::SetActivityNotify(notify) => {
+                self.activity.notify_on_change = notify;
+            }
+            Action::RefreshCallDiagnostics => {
+                self.call_diag = Some(CallDiagnostics::snapshot());
             }
             Action::SendFiles(paths) => self.stage_files(paths),
             Action::SendPending { chat, caption } => self.send_pending(chat, caption),
@@ -2235,6 +2379,15 @@ impl App {
                         rgba: std::sync::Arc::new(rgba),
                         texture: None,
                     });
+                    // A browser copy holds both the bitmap and its URL. egui
+                    // already pasted the URL on the key press; the picture is
+                    // the attachment, so drop the trailing URL text.
+                    if let Ok(mut clipboard) = arboard::Clipboard::new()
+                        && let Ok(text) = clipboard.get_text()
+                        && !text.is_empty()
+                    {
+                        self.composer = strip_image_paste_text(&self.composer, &text);
+                    }
                     self.focus_composer = true;
                 }
             }
@@ -2404,6 +2557,12 @@ impl App {
                         arguments: self.update_arguments.clone(),
                     });
                 }
+            }
+            Action::SetFont(family) => {
+                self.settings.font_family = family;
+                theme::install_fonts(ctx, self.settings.font_family.as_deref());
+                ctx.request_repaint();
+                self.mark_settings_dirty();
             }
             Action::SetTheme(choice) => {
                 self.settings.theme = choice;
@@ -2880,6 +3039,22 @@ pub fn wants_paste(input: &egui::InputState) -> bool {
     })
 }
 
+/// Removes clipboard text that arrived with an image paste.
+///
+/// Copying an image in a browser fills the clipboard with both the bitmap
+/// and its source URL. egui pastes the URL into the composer while the app
+/// stages the bitmap, leaving both behind. When an image is staged, drop a
+/// trailing copy of the clipboard text so only the attachment remains.
+fn strip_image_paste_text(composer: &str, pasted: &str) -> String {
+    if pasted.is_empty() {
+        return composer.to_owned();
+    }
+    match composer.strip_suffix(pasted) {
+        Some(rest) => rest.to_owned(),
+        None => composer.to_owned(),
+    }
+}
+
 /// Clipboard image as width, height, and straight-alpha RGBA.
 fn clipboard_image() -> Option<(usize, usize, Vec<u8>)> {
     let mut clipboard = arboard::Clipboard::new().ok()?;
@@ -2905,6 +3080,164 @@ mod tests {
     fn app() -> App {
         let root = std::env::temp_dir().join(format!("zapfast-app-{}", std::process::id()));
         App::headless(AppDirs::under(&root), Settings::default()).0
+    }
+
+    #[test]
+    fn image_paste_strips_the_accompanying_url_text() {
+        // Copying an image in a browser leaves both the bitmap and its URL
+        // in the clipboard. Staging the picture must not leave the URL behind.
+        assert_eq!(
+            strip_image_paste_text(
+                "https://example.com/photo.png",
+                "https://example.com/photo.png"
+            ),
+            ""
+        );
+        assert_eq!(
+            strip_image_paste_text(
+                "hello https://example.com/photo.png",
+                "https://example.com/photo.png"
+            ),
+            "hello "
+        );
+        assert_eq!(
+            strip_image_paste_text("hello", "https://example.com/photo.png"),
+            "hello"
+        );
+    }
+
+    #[test]
+    fn clicking_an_oversized_attachment_does_not_start_a_download() {
+        let mut app = app();
+        let (backend, mut commands) = Backend::recording();
+        app.backend = backend;
+        let ctx = egui::Context::default();
+        let chat = "peer@s.whatsapp.net";
+        app.open_chat = Some(chat.into());
+        let mut row = message(chat, "big", 1);
+        row.content = Content::Document {
+            media: Media {
+                mime: "video/mp4".into(),
+                size: crate::model::ATTACHMENT_DOWNLOAD_LIMIT + 1,
+                width: None,
+                height: None,
+                path: None,
+                state: MediaState::Idle,
+            },
+            file_name: "big.mp4".into(),
+            caption: None,
+            pages: None,
+        };
+        app.conversations
+            .entry(chat.into())
+            .or_default()
+            .merge(vec![row], false);
+        app.apply(
+            Action::Download {
+                chat: chat.into(),
+                message: "big".into(),
+            },
+            &ctx,
+        );
+        assert!(
+            commands.try_recv().is_err(),
+            "an oversized click must not send a download"
+        );
+        assert!(
+            app.media_of(chat, "big")
+                .is_some_and(|media| matches!(&media.state, MediaState::Failed(_))),
+            "an oversized attachment shows a failure instead of downloading"
+        );
+    }
+
+    #[test]
+    fn media_dir_changed_event_updates_settings_and_dirs() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _events) =
+            App::headless(AppDirs::under(directory.path()), Settings::default());
+        let chat = "peer@s.whatsapp.net";
+        // A downloaded file the new folder also contains under its name.
+        let custom = directory.path().join("attachments");
+        std::fs::create_dir_all(&custom).unwrap();
+        std::fs::write(custom.join("clip.mp4"), b"clip").unwrap();
+        let missing = directory
+            .path()
+            .join("cache")
+            .join("media")
+            .join("clip.mp4");
+        let mut row = message(chat, "clip", 1);
+        row.content = Content::Document {
+            media: Media {
+                mime: "video/mp4".into(),
+                size: 4,
+                width: None,
+                height: None,
+                path: Some(missing),
+                state: MediaState::Idle,
+            },
+            file_name: "clip.mp4".into(),
+            caption: None,
+            pages: None,
+        };
+        app.conversations
+            .entry(chat.into())
+            .or_default()
+            .merge(vec![row], false);
+        app.apply_media_dir(Some(custom.clone()));
+        assert_eq!(app.settings.custom_media_dir, Some(custom.clone()));
+        assert_eq!(app.dirs.media_dir(), custom);
+        assert!(app.settings_dirty);
+        assert_eq!(
+            app.media_of(chat, "clip")
+                .and_then(|media| media.path.clone()),
+            Some(custom.join("clip.mp4"))
+        );
+        app.apply_media_dir(None);
+        assert_eq!(app.settings.custom_media_dir, None);
+        assert_eq!(app.dirs.media_dir(), app.dirs.media_cache_dir());
+    }
+
+    #[test]
+    fn activity_monitor_validates_input_before_subscribing() {
+        let mut app = app();
+        let (backend, mut commands) = Backend::recording();
+        app.backend = backend;
+        let ctx = egui::Context::default();
+        app.activity.input = "123".into();
+        app.apply(Action::StartActivityMonitor, &ctx);
+        assert!(!app.activity.monitoring());
+        assert!(commands.try_recv().is_err());
+        app.activity.input = "+39 333 123 4567".into();
+        app.apply(Action::StartActivityMonitor, &ctx);
+        assert!(app.activity.monitoring());
+        assert!(matches!(
+            commands.try_recv().unwrap(),
+            Command::TrackPresence { .. }
+        ));
+        app.apply(Action::SetActivityNotify(true), &ctx);
+        assert!(app.activity.notify_on_change);
+        app.apply(Action::StopActivityMonitor, &ctx);
+        assert!(!app.activity.monitoring());
+    }
+
+    #[test]
+    fn font_choice_survives_window_recreation_and_can_reset() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        app.apply(Action::SetFont(Some("Missing fixture font".into())), &ctx);
+        assert_eq!(
+            app.settings.font_family.as_deref(),
+            Some("Missing fixture font")
+        );
+        assert!(app.settings_dirty);
+        app.attach(&egui::Context::default());
+        assert_eq!(
+            app.settings.font_family.as_deref(),
+            Some("Missing fixture font")
+        );
+        app.apply(Action::SetFont(None), &ctx);
+        assert!(app.settings.font_family.is_none());
     }
 
     #[test]

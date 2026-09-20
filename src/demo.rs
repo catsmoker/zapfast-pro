@@ -876,6 +876,30 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                 app.scroll_to_bottom = true;
             }
             "settings" => app.page = Page::Settings,
+            "advanced" => {
+                app.page = Page::Advanced;
+                let now = crate::util::now();
+                app.activity.input.clear();
+                app.activity.start(
+                    crate::activity::MonitoredTarget {
+                        id: "393331234567@s.whatsapp.net".into(),
+                        label: "Ada Demo".into(),
+                    },
+                    now - 3600,
+                );
+                app.activity
+                    .note_presence("393331234567@s.whatsapp.net", true, now - 300);
+                app.activity
+                    .note_typing("393331234567@s.whatsapp.net", now - 60);
+                app.call_diag = Some(crate::call_diagnostics::CallDiagnostics::snapshot());
+            }
+            choice if choice.starts_with("font=") => {
+                app.settings.font_family = choice
+                    .strip_prefix("font=")
+                    .map(str::trim)
+                    .filter(|family| !family.is_empty())
+                    .map(str::to_owned);
+            }
             "omarchy" | "omarchy-light" => {
                 let mut themes: Vec<_> = crate::theme::presets::themes().collect();
                 let filename = if part == "omarchy-light" {
@@ -1310,6 +1334,37 @@ mod tests {
     }
 
     #[test]
+    fn demo_font_arguments_trim_names_and_restore_the_default_when_blank() {
+        let mut app = app();
+        for (argument, expected) in [
+            (
+                "settings,font=Missing fixture font",
+                Some("Missing fixture font"),
+            ),
+            ("settings,font=", None),
+            (
+                "settings,font=  Missing fixture font  ",
+                Some("Missing fixture font"),
+            ),
+            ("settings,font= \t ", None),
+        ] {
+            apply_flags(&mut app, Some(argument));
+            assert_eq!(app.settings.font_family.as_deref(), expected);
+        }
+    }
+
+    #[test]
+    fn missing_custom_font_keeps_settings_and_messages_renderable() {
+        let mut app = app();
+        apply_flags(&mut app, Some("settings,font=Missing fixture font"));
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        app.page = Page::Chats;
+        render(&mut app, &ctx);
+    }
+
+    #[test]
     fn the_sample_has_every_kind_of_row() {
         let app = app();
         assert!(app.chats.len() >= 5);
@@ -1355,6 +1410,7 @@ mod tests {
             "rtl",
             "disappearing",
             "settings",
+            "advanced",
             "update",
             "update-downloading",
             "update-ready",

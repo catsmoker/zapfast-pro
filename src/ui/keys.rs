@@ -62,7 +62,7 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
             actions.push(Action::CancelEdit);
         } else if app.reply_to.is_some() {
             actions.push(Action::CancelReply);
-        } else if app.page == Page::Settings {
+        } else if app.page == Page::Settings || app.page == Page::Advanced {
             actions.push(Action::Open(Page::Chats));
         } else if search_focused || !app.search.is_empty() {
             if !app.search.is_empty() {

@@ -1,5 +1,6 @@
 //! Window layout: panels, overlays, keyboard shortcuts.
 
+pub mod advanced;
 pub mod chats;
 pub mod conversation;
 pub mod dialogs;
@@ -42,6 +43,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         .frame(Frame::new().fill(palette.chat))
         .show(ui, |ui| match app.page {
             Page::Settings => settings::show(app, ui),
+            Page::Advanced => advanced::show(app, ui),
             Page::Chats => conversation::show(app, ui),
         });
     update::show(app, ctx);
@@ -336,7 +338,7 @@ mod idle_tests {
         app.sync_percent = Some(42);
         app.open_chat = None;
         let ctx = egui::Context::default();
-        theme::install(&ctx);
+        theme::install(&ctx, None);
         let mut delay = std::time::Duration::ZERO;
         for index in 0..6 {
             let mut output = ctx.run_ui(
@@ -396,7 +398,7 @@ mod idle_tests {
         app.conversations.insert(chat.id.clone(), conversation);
 
         let ctx = egui::Context::default();
-        theme::install(&ctx);
+        theme::install(&ctx, None);
         let mut delay = std::time::Duration::ZERO;
         for index in 0..6 {
             let mut output = ctx.run_ui(
@@ -455,7 +457,7 @@ mod idle_tests {
         app.conversations.insert(chat.id.clone(), conversation);
 
         let ctx = egui::Context::default();
-        theme::install(&ctx);
+        theme::install(&ctx, None);
 
         // Open chat initially
         app.open_chat = Some(chat.id.clone());

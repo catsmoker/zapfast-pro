@@ -513,7 +513,7 @@ impl Worker {
     /// Re-derives archived rows from raw protobufs after parser changes. Also
     /// repairs moved attachment paths or clears missing files for redownload.
     fn relocate_media(&mut self) {
-        let dir = self.dirs.media_cache_dir();
+        let dir = self.dirs.media_dir();
         let rows = match self.archive.media_paths() {
             Ok(rows) => rows,
             Err(error) => {
@@ -546,6 +546,33 @@ impl Worker {
                 dir.display()
             );
         }
+    }
+
+    /// Applies a custom attachment folder: validates it, repoints archive
+    /// rows by file name, and reports the effective folder. Existing files
+    /// stay where they are; only new downloads use the new folder. Logout
+    /// still clears just the default cache, so custom folders survive.
+    fn set_media_dir(&mut self, dir: Option<PathBuf>) {
+        let mut dirs = self.dirs.clone();
+        dirs.set_custom_media_dir(dir);
+        let custom = dirs.custom_media_dir.clone();
+        if let Some(ref custom) = custom
+            && !self.dirs.custom_media_dir_valid(custom)
+        {
+            self.emit(Event::Error(
+                "Choose a folder outside the cache directory".to_owned(),
+            ));
+            return;
+        }
+        if let Some(ref custom) = custom
+            && let Err(error) = std::fs::create_dir_all(custom)
+        {
+            self.emit(Event::Error(format!("Could not use that folder: {error}")));
+            return;
+        }
+        self.dirs = dirs;
+        self.relocate_media();
+        self.emit(Event::MediaDirChanged(custom));
     }
 
     fn backfill(&mut self) {
@@ -2125,7 +2152,18 @@ impl Worker {
                         }
                         self.chat_name(&id, None)
                     }
-                    None => self.chat_name(&id, None),
+                    None => match existing.as_ref() {
+                        // Later history chunks can omit the subject. Keep a
+                        // known group name instead of falling back to "Group".
+                        Some(row)
+                            if ChatKind::from_id(&id) == ChatKind::Group
+                                && !row.name.is_empty()
+                                && row.name != fallback_name(&id) =>
+                        {
+                            row.name.clone()
+                        }
+                        _ => self.chat_name(&id, None),
+                    },
                 };
                 let mut row = Chat::new(id.clone(), name);
                 row.last_activity = chat.last_activity;
@@ -2519,6 +2557,36 @@ impl Worker {
                 });
             }
             Command::Picked { chat, paths } => self.emit(Event::Picked { chat, paths }),
+            Command::PickMediaDir => {
+                let commands = self.commands.clone();
+                tokio::task::spawn_blocking(move || {
+                    let dir = rfd::FileDialog::new()
+                        .set_title("Attachment folder")
+                        .pick_folder();
+                    // Ignore folder-picker cancellation.
+                    if dir.is_some() {
+                        let _ = commands.send(Command::SetMediaDir(dir));
+                    }
+                });
+            }
+            Command::SetMediaDir(dir) => self.set_media_dir(dir),
+            Command::TrackPresence { chat } => {
+                // Same subscription as opening a direct chat: idempotent
+                // through `presence_subscribed`, presence flows back through
+                // the regular presence events.
+                if ChatKind::from_id(&chat) != ChatKind::Direct || chat == self.me() {
+                    return;
+                }
+                if self.presence_subscribed.insert(chat.clone())
+                    && let (Some(client), Some(jid)) = (self.client.clone(), Self::jid_of(&chat))
+                {
+                    tokio::spawn(async move {
+                        if let Err(error) = client.presence().subscribe(jid).await {
+                            log::debug!("presence not subscribed: {error}");
+                        }
+                    });
+                }
+            }
             Command::SendFiles {
                 chat,
                 paths,
@@ -3357,6 +3425,40 @@ impl Worker {
                 });
                 return;
             };
+        // Reject honest oversized metadata before holding the bytes in memory.
+        let declared: Option<u64> = base
+            .image_message
+            .as_option()
+            .and_then(|media| media.file_length)
+            .or_else(|| {
+                base.video_message
+                    .as_option()
+                    .or(base.ptv_message.as_option())
+                    .and_then(|media| media.file_length)
+            })
+            .or_else(|| {
+                base.audio_message
+                    .as_option()
+                    .and_then(|media| media.file_length)
+            })
+            .or_else(|| {
+                base.document_message
+                    .as_option()
+                    .and_then(|media| media.file_length)
+            })
+            .or_else(|| {
+                base.sticker_message
+                    .as_option()
+                    .and_then(|media| media.file_length)
+            });
+        if declared.is_some_and(crate::model::attachment_too_large) {
+            self.emit(Event::Media {
+                chat,
+                message: id,
+                result: Err("Attachment is larger than 64 MiB".to_owned()),
+            });
+            return;
+        }
         // Keep metadata needed for one media re-upload request and retry.
         let media_key = base
             .image_message
@@ -3424,7 +3526,7 @@ impl Worker {
             }
             None
         };
-        let dir = self.dirs.media_cache_dir();
+        let dir = self.dirs.media_dir();
         let commands = self.commands.clone();
         tokio::spawn(async move {
             let keep = |bytes: Vec<u8>| {
@@ -3915,7 +4017,7 @@ impl Worker {
             };
             let commands = self.commands.clone();
             let chat = chat.clone();
-            let dir = self.dirs.media_cache_dir();
+            let dir = self.dirs.media_dir();
             let me = self.me();
             // Attach the caption to the first file.
             let caption = if index == 0 { caption.clone() } else { None };
@@ -3974,7 +4076,7 @@ impl Worker {
             return;
         };
         let commands = self.commands.clone();
-        let dir = self.dirs.media_cache_dir();
+        let dir = self.dirs.media_dir();
         let me = self.me();
         tokio::spawn(async move {
             let outcome = async {
@@ -4047,7 +4149,7 @@ impl Worker {
             None => (None, None),
         };
         let commands = self.commands.clone();
-        let dir = self.dirs.media_cache_dir();
+        let dir = self.dirs.media_dir();
         let me = self.me();
         tokio::spawn(async move {
             let outcome = async {
@@ -4116,7 +4218,7 @@ impl Worker {
             return;
         };
         let commands = self.commands.clone();
-        let dir = self.dirs.media_cache_dir();
+        let dir = self.dirs.media_dir();
         let me = self.me();
         tokio::spawn(async move {
             let outcome = async {
@@ -4152,7 +4254,7 @@ impl Worker {
             return;
         };
         let commands = self.commands.clone();
-        let dir = self.dirs.media_cache_dir();
+        let dir = self.dirs.media_dir();
         let me = self.me();
         tokio::spawn(async move {
             let outcome = async {
@@ -6514,6 +6616,43 @@ mod receipt_tests {
             });
             assert_eq!(chat.muted_until, expected);
         }
+    }
+
+    #[test]
+    fn later_history_chunks_keep_a_known_group_name() {
+        let (mut worker, ..) = worker();
+        let group = "1-2@g.us";
+        let chunk = |name: Option<String>| ParsedHistory {
+            chats: vec![ParsedChat {
+                id: group.into(),
+                name,
+                unread: None,
+                archived: false,
+                pinned_at: None,
+                muted_until: None,
+                ephemeral_expiration: None,
+                ephemeral_setting_timestamp: None,
+                last_activity: 0,
+                pn_jid: None,
+                lid_jid: None,
+                more_on_phone: None,
+                messages: Vec::new(),
+                revoked: Vec::new(),
+                poll_updates: Vec::new(),
+                reactions: Vec::new(),
+            }],
+            push_names: Vec::new(),
+            lids: Vec::new(),
+            stickers: Vec::new(),
+        };
+        worker.apply_history(chunk(Some("Family".into())), true);
+        assert_eq!(worker.archive.chat(group).unwrap().unwrap().name, "Family");
+        worker.apply_history(chunk(None), true);
+        assert_eq!(
+            worker.archive.chat(group).unwrap().unwrap().name,
+            "Family",
+            "a chunk without a subject must not reset the name to Group"
+        );
     }
 
     #[tokio::test]

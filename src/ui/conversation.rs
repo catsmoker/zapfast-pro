@@ -15,14 +15,12 @@ use crate::app::{App, Conversation};
 use crate::markup;
 use crate::model::{
     Action, Chat, ChatId, Content, Delivery, Dialog, LinkPreview, Media, MediaState, Message,
-    PickerTab,
+    PickerTab, attachment_too_large,
 };
 use crate::theme::{self, Icon, Palette};
 
 use super::widgets;
 
-/// Maximum automatic attachment download size.
-const AUTO_DOWNLOAD_LIMIT: u64 = 64 * 1024 * 1024;
 /// Group-message avatar size.
 const SENDER_AVATAR: f32 = 28.0;
 const BODY_SIZE: f32 = 14.5;
@@ -1163,6 +1161,8 @@ struct View<'a> {
     mention_names: &'a dyn Fn(&str) -> String,
     avatars: &'a HashMap<String, Option<PathBuf>>,
     now: i64,
+    /// Animate media only while this window is active.
+    animate: bool,
     player: &'a crate::audio::Player,
     copy_rows: &'a std::sync::Mutex<Vec<crate::transcript::Row>>,
 }
@@ -1207,6 +1207,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
         mention_names: &mention_names,
         avatars: &avatars,
         now: crate::util::now(),
+        animate: app.window_focused,
         player: &app.player,
         copy_rows: app.copy_rows.as_ref(),
     };
@@ -2937,7 +2938,7 @@ fn picture(
             );
             let (rect, response) = ui.allocate_exact_size(size, Sense::click());
             if ui.is_rect_visible(rect) {
-                match animation::frame(ui, path, rect) {
+                match animation::frame(ui, path, rect, view.animate && response.hovered()) {
                     animation::Frame::Ready(texture) => {
                         ui.painter().image(
                             texture.id(),
@@ -2946,7 +2947,10 @@ fn picture(
                             Color32::WHITE,
                         );
                     }
-                    _ => egui::Image::new(file_uri(path)).paint_at(ui, rect),
+                    _ => {
+                        ui.painter().rect_filled(rect, 6.0, palette.surface);
+                        theme::paint_icon(ui, Icon::Sticker, rect, 32.0, palette.secondary);
+                    }
                 }
             }
             if response
@@ -3089,7 +3093,7 @@ fn picture(
         && !matches!(media.state, MediaState::Downloading);
     let auto = ui.is_rect_visible(rect)
         && matches!(media.state, MediaState::Idle)
-        && (sticker.is_some() || (view.auto_download && media.size <= AUTO_DOWNLOAD_LIMIT));
+        && (sticker.is_some() || (view.auto_download && !attachment_too_large(media.size)));
     if wants || auto {
         actions.push(Action::Download {
             chat: view.chat.id.clone(),
@@ -3137,7 +3141,12 @@ fn video(
     // Play downloaded GIFs in place; keep a poster for other videos.
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let playing = match (&media.path, gif) {
-        (Some(path), true) => Some(animation::frame(ui, path, rect)),
+        (Some(path), true) => Some(animation::frame(
+            ui,
+            path,
+            rect,
+            view.animate && response.hovered(),
+        )),
         _ => None,
     };
     if let Some(animation::Frame::Ready(texture)) = &playing {
@@ -3209,7 +3218,7 @@ fn video(
         && media.path.is_none()
         && matches!(media.state, MediaState::Idle)
         && view.auto_download
-        && media.size <= AUTO_DOWNLOAD_LIMIT;
+        && !attachment_too_large(media.size);
     if auto {
         actions.push(Action::Download {
             chat: view.chat.id.clone(),
@@ -3304,7 +3313,7 @@ fn attachment(
         && media.path.is_none()
         && matches!(media.state, MediaState::Idle)
         && view.auto_download
-        && media.size <= AUTO_DOWNLOAD_LIMIT;
+        && !attachment_too_large(media.size);
     if auto {
         actions.push(Action::Download {
             chat: view.chat.id.clone(),
@@ -3564,7 +3573,7 @@ fn voice_player(
     let auto = media.path.is_none()
         && matches!(media.state, MediaState::Idle)
         && view.auto_download
-        && media.size <= AUTO_DOWNLOAD_LIMIT;
+        && !attachment_too_large(media.size);
     if auto {
         actions.push(Action::Download {
             chat: view.chat.id.clone(),

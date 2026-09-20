@@ -219,6 +219,14 @@ pub enum Command {
     },
     /// Selects and sends files with the desktop picker.
     PickFiles(ChatId),
+    /// Opens the folder picker for downloaded attachments.
+    PickMediaDir,
+    /// Applies a custom attachment folder (`None` resets to the cache).
+    SetMediaDir(Option<PathBuf>),
+    /// Subscribes presence updates for an activity-tracked chat.
+    TrackPresence {
+        chat: ChatId,
+    },
     /// Sends files with the caption on the first.
     SendFiles {
         chat: ChatId,
@@ -451,6 +459,8 @@ pub enum Event {
         chat: ChatId,
         paths: Vec<PathBuf>,
     },
+    /// Effective custom attachment folder (`None` means the cache).
+    MediaDirChanged(Option<PathBuf>),
     /// Live incoming message for desktop notification.
     Incoming {
         chat: ChatId,

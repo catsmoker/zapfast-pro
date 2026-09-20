@@ -1,11 +1,13 @@
 //! ZapFast internals exposed for diagnostics and tests.
 
+pub mod activity;
 pub mod animation;
 pub mod app;
 pub mod archive;
 pub mod audio;
 pub mod backend;
 pub mod bidi;
+pub mod call_diagnostics;
 #[cfg(any(test, feature = "demo"))]
 pub mod demo;
 pub mod emoji;

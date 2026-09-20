@@ -51,6 +51,12 @@ See **[zapfast.rocks](https://zapfast.rocks)** for downloads and guides.
   Color Emoji on macOS and Windows. On Linux, ZapFast prefers an installed
   Noto Color Emoji and falls back to the bundled copy. Emoji-only messages
   are larger.
+- **Custom fonts.** Settings → Appearance → Font lets you search installed font
+  families and apply one to the interface and messages, with a text preview.
+  Inter remains the default and is used if the chosen font becomes unavailable.
+  Emoji and language fallbacks are preserved; code stays monospace. Install fonts
+  through your operating system, then restart ZapFast to refresh the list. Zoom
+  remains a separate setting.
 - **Send attachments with captions.** Paste a picture, drop files, or use the
   file picker. They stay in the composer until you send them or press Escape.
 - **Mute chats** for eight hours, one week, or indefinitely. The setting also
@@ -78,8 +84,8 @@ See **[zapfast.rocks](https://zapfast.rocks)** for downloads and guides.
   after they expire on the phone.
   A clock badge on chat avatars shows enabled timers and follows changes from
   the phone. Changing the default timer for new chats leaves existing chats alone.
-- **View attachments.** ZapFast downloads files up to 64 MB automatically or
-  on click. Photos, stickers, GIFs, voice messages, audio, locations, contacts,
+- **View attachments.** ZapFast downloads files up to 64 MiB automatically or
+  on click; larger files are refused. Photos, stickers, GIFs, voice messages, audio, locations, contacts,
   polls, and link previews appear in the chat. Videos and documents open in
   their default desktop apps. Profile pictures and downloaded images support
   Windows drive paths and filenames with spaces or non-ASCII characters.
@@ -111,7 +117,8 @@ See **[zapfast.rocks](https://zapfast.rocks)** for downloads and guides.
 - **Presence.** See online, last-seen, and typing status, and send your typing
   status.
 - **Idle rendering.** History-sync progress updates when data arrives. Animated
-  stickers and GIFs play only while their message or picker tile is visible.
+  stickers and GIFs show a still first frame until hovered in the focused
+  window, and only while their message or picker tile is visible.
 - **Sync recovery.** A conflicting app-state collection is recovered through
   whatsapp-rust, including requesting a fresh snapshot from the paired phone
   when validation fails. Private read-state updates run one at a time. Failures
@@ -147,6 +154,12 @@ See **[zapfast.rocks](https://zapfast.rocks)** for downloads and guides.
   Existing plaintext archives are migrated on first use. Attachments remain
   ordinary files in the cache directory. Unlinking deletes both and removes this device from
   your phone.
+- **Experimental tools.** Settings → Advanced Tools holds opt-in experiments:
+  a Device Activity Tracker that reports a number's WhatsApp presence
+  (online, last seen, typing) with a timeline, and Call Network Diagnostics
+  showing locally observable network state. Calls themselves are unsupported,
+  so call-specific rows read Unavailable; nothing is sent anywhere and no
+  exact locations are ever claimed.
 
 ## What it does not do yet
 
@@ -269,7 +282,7 @@ to your phone and linked devices.
 | Settings | `~/.config/zapfast/settings.json` | JSON, safe to edit |
 | Device keys | `~/.local/state/zapfast/session.db` | Owned by whatsapp-rust; deleting it unlinks |
 | Messages | `~/.local/state/zapfast/archive.db` | SQLCipher-encrypted SQLite, unlocked by the OS keyring; raw messages retain attachment keys |
-| Attachments, avatars | `~/.cache/zapfast/` | Safe to delete |
+| Attachments, avatars | `~/.cache/zapfast/` | Safe to delete; attachments can use a custom folder from Settings, which is preserved on unlink |
 | Saved stickers and packs | `~/.local/state/zapfast/stickers/` | Plain WebP files; each pack is a folder |
 | Log of the last run | `~/.local/state/zapfast/zapfast.log` | `--verbose` for more |
 
@@ -377,7 +390,9 @@ For an automatic start, add `--demo-tour-delay 5000` (milliseconds).
 Use `--demo` instead of `--demo-tour` to explore the sample chats yourself.
 For deterministic theme screenshots, `--demo-page settings,omarchy` and
 `--demo-page settings,omarchy-light` preview following dark and light Omarchy
-palettes without changing the desktop theme.
+palettes without changing the desktop theme. Add `font=Family Name` to preview
+an installed font, for example `--demo-page "settings,font=Noto Serif"`.
+An empty or whitespace-only `font=` value restores Inter (default).
 
 On Omarchy, run `omarchy screenrecord`, select the demo window, then press Space
 in ZapFast. Recording has no audio unless you explicitly enable desktop or

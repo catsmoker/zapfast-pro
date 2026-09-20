@@ -1,292 +1,97 @@
 # ZapFast agent guide
 
 ZapFast is a small native WhatsApp client: Rust, egui, and the
-[whatsapp-rust](https://github.com/oxidezap/whatsapp-rust) library for the
-protocol. These notes are for coding agents and new contributors.
+[whatsapp-rust](https://github.com/oxidezap/whatsapp-rust) library for the protocol.
 
-## Product boundaries
+## Scope
 
-- Keep it a small native client. No browser engine, no telemetry, no
-  hosted backend, no second account system.
-- The protocol comes from whatsapp-rust. Do not reimplement pieces of it
-  here, and do not advertise a capability merely because a protobuf field
-  for it exists.
-- Do not broaden a task into adjacent features or a general refactor.
-  Preserve existing user behaviour unless the task changes it.
+- Keep it a small native client. No browser engine, no telemetry, no hosted backend, no second account system.
+- Protocol behavior comes from whatsapp-rust. Do not reimplement it here, and do not treat a protobuf field as a supported feature.
+- Keep changes narrow. Preserve existing behavior unless the task changes it.
 
 ## Privacy
 
-- The user's archive is personal data. Do not read chat rows, message
-  bodies, contacts, or other user content out of `archive.db` or any
-  exported log, not even read-only. Schema, column existence, and row
-  counts are fine; message contents are not.
-- When a bug report or feature needs the user's data, hand the user the
-  query or command to run and let them report the result back.
-- Never log message contents, phone numbers, keys, or QR payloads at a
-  level that ships (see the definition of done); treat existing
-  captures of them the same way.
+- Do not read chat rows, message bodies, contacts, or other user content from `archive.db` or exported logs, not even read-only. Schema, column existence, and row counts are fine.
+- When user data is needed for a bug, give the user the query or command and let them report back.
+- Never log message contents, phone numbers, keys, or QR payloads at a level that ships. Treat existing captures the same way.
+
+## Setup
+
+- `rust-toolchain.toml` pins Rust 1.98.0. CI uses stable plus the same components; fix new fmt or lint failures on toolchain bumps.
+- Linux builds need: `libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev cmake perl` (Debian) or `libxkbcommon wayland mesa alsa-lib cmake perl` (Arch). Voice needs cmake for bundled libopus and ALSA headers; video fallback needs no extra setup for H.264 (`openh264` builds its C++ from source, `nasm` only adds SIMD paths).
+- `whatsapp-rust` is pinned to a git rev in `Cargo.toml` because crates.io 0.7.0 needs nightly Rust. Do not unpin or upgrade without checking stable builds and snapshot recovery behavior.
+- GIF search key: Settings overrides the build-time `ZAPFAST_GIPHY_KEY` (`option_env!`, `FASTSAPP_GIPHY_KEY` still works as fallback). The repo carries no key.
+- `demo` runs use a temp dir, never touch the linked account, archive, or tray, and can run beside the live app.
 
 ## Architecture
 
-- `src/ui/` draws views and pushes `model::Action`s; `src/app.rs` applies
-  them after the frame. Never mutate application state from inside a view
-  beyond the view's own fields (composer text, search text, flags).
-- `src/backend.rs` is the interface's handle to a tokio runtime on its own
-  thread; `src/backend/worker.rs` runs there. It owns the whatsapp-rust
-  `Bot`, the message archive, downloads, and profile pictures. The two
-  sides talk only through `Command` (interface to runtime) and `Event`
-  (runtime to interface); every event wakes the window through `Waker`.
-- `src/archive.rs` is the SQLite store of chats, messages, contacts, and
-  privacy-id mappings. WhatsApp replays history once, at link time, so the
-  archive is the only copy. It keeps each message's raw protobuf because
-  the keys to fetch an attachment live in it. `src/archive/encryption.rs` opens
-  the archive with SQLCipher and a random key stored in the OS keyring. Plaintext
-  migration checkpoints the old WAL and verifies an encrypted staging file before
-  atomic replacement. A locked or missing key stops linking; never fall back to
-  a disposable archive. Tests use fixtures and mock credentials only.
-- `src/model.rs` holds the app's own types. Views never touch a protobuf;
-  the worker translates in `classify()` and `parse_conversation()`.
-- Poll creation, voting, and decryption use whatsapp-rust's `Client::polls()`.
-  `backend/worker/polls.rs` retains the original creator identity and key in the
-  encrypted archive; `archive/polls.rs` keeps each voter's latest timestamp and
-  message id, including encrypted updates whose parent has not arrived yet.
-  History replay must not undo a newer vote or withdrawal. Decryption runs in
-  batches of eight, with failures retried after reconnecting. The interface only
-  receives option counts and its own selection, never keys or protobufs. Visible
-  polls request phone history automatically, anchored after the creation message
-  so the response includes its vote snapshot. `poll_history.rs` serializes these
-  requests and retries from 30 seconds to 15 minutes without an interface timer.
-  History request timestamps are Unix seconds: the library argument and wire
-  field misleadingly end in `Ms`. Do not multiply archive timestamps by 1,000.
-  A repeated poll question with no usable vote snapshot cannot finish recovery.
-- Chat ids are canonical strings: a chat behind a privacy id (`@lid`) is
-  filed under its phone number once the mapping is known. Use
-  `Worker::canonical` for anything that arrives as a `Jid`.
-- `src/updates/` downloads verified GitHub releases and hands installation to a
-  helper after an explicit restart action. Keep package-manager detection, asset
-  checksums, startup acknowledgement and rollback intact. Portable releases carry
-  `packaging/zapfast-portable.txt`; the Windows installer has its own marker.
-- `src/theme/custom.rs` scans local JSON palettes off the UI thread, caching the
-  last usable choice in settings, with shared Spotifast palettes embedded as
-  defaults. On Linux filesystem notifications reload the catalog and the active
-  Omarchy palette without a repaint timer; following Omarchy does not require
-  packaged assets. Native packages ship optional hooks and templates, preserving
-  existing per-user files. `reload-themes` uses the single-instance channel
-  without opening a window.
-- `src/theme.rs` owns colours, fonts, and icons; `src/ui/widgets.rs` the
-  shared controls. New icons go in `assets/icons/` as 24px Lucide-style SVGs
-  and in the `icons!` table.
-- `src/markup.rs` turns WhatsApp's text markup, links, and mentions into an
-  egui `LayoutJob`; `src/emoji.rs` swaps every emoji for a placeholder
-  glyph at layout time and paints the desktop's colour emoji bitmap over
-  it afterwards (resolving sequences through the font's GSUB ligatures).
-  Any text that can hold an emoji goes through `widgets::line` /
-  `widgets::rich_text` or `markup::layout`, never a bare `Label`.
-- `src/animation.rs` plays animated stickers and GIFs: WebP/GIF frames
-  decode in-process, and so do MP4s (the `mp4` crate demuxes, `openh264`
-  decodes the H.264 WhatsApp uses, samples converted from AVCC to Annex
-  B); `ffmpeg` is only a fallback for other codecs. `openh264` compiles
-  its C++ from source with the C++ compiler of the host; `nasm` is
-  optional and only adds the SIMD paths (the AUR recipes leave it out,
-  the build works without it). Frames become textures on the interface
-  thread and are dropped when unseen.
-- Message bodies paint through `markup::paint_selectable` and single lines
-  through `widgets::selectable_rich_text`: both hand the galley to
-  `egui::text_selection::LabelSelectionState` (which paints it) and only
-  overlay the colour emoji, so text can be swept and copied while
-  `style.interaction.selectable_labels` stays false for every other label.
-  The response must sense clicks and drags. `SelectionLeash` (an egui
-  `input_hook` plugin) clamps a drag that started in the message view to
-  just inside its edge once the pointer strays out (the platform keeps
-  reporting a grabbed pointer beyond the window), and drops mid-drag
-  `PointerGone`, so the selection keeps a row under it while the edge
-  scroll brings more past. A copy that sweeps across
-  messages is rebuilt by `src/transcript.rs` with `[time, date] Name:`
-  per message (the phone's sharing format): every drawn body lands in
-  `App::copy_rows` each frame, and the `CopyAnnotator` egui plugin
-  rewrites the queued `CopyText` in `output_hook`, the only hook that
-  runs after the selection plugin's own end-of-pass flush (plugins run
-  in registration order and the built-ins come first, so end-pass
-  callbacks fire too early).
-  Selection galleys share the message viewport's horizontal bounds while
-  retaining their glyph positions: otherwise egui considers short incoming
-  and outgoing messages separate columns and will not sweep across them.
-- Group names and members come from `groups().get_metadata`, asked one
-  turn at a time (two per 5 s tick, `pump_group_info`): dozens of unnamed
-  groups arrive with history sync and a burst of queries hits the
-  server's rate limit, which once left groups called "Group" forever.
-  Failures back off (30 s doubling, seven tries); item-not-found,
-  forbidden and not-authorized are final and stop the asking.
-- A download that answers 403/404/410 goes through
-  `client.media_reupload().request(..)` (a server-error receipt; WhatsApp
-  has the phone re-upload and answers with a fresh `direct_path`) and is
-  fetched once more before the bubble reports "No longer on WhatsApp's
-  servers". Download failures never toast; they live in the bubble as
-  "... · click to retry". Copied text is refined by
-  `transcript::refine`: emoji placeholders map back through each row's
-  `placements`.
-- History sync can bring a chat with a name and no messages at all; a
-  history request for such a chat is anchored at the present with an
-  empty message id (`worker::fetch_older`), and the app asks the phone
-  as soon as such a chat loads or opens, instead of never.
-- `eframe`'s `glow_options` turn vsync off: a Wayland compositor stops
-  sending frame callbacks to a window on a hidden workspace, a vsync wait
-  there blocks the event loop and its ping replies, and Hyprland then
-  calls the app unresponsive. Repaints are event-driven, so nothing spins.
-- `src/voice.rs` is the codec for voice messages: OGG/Opus in and out
-  (the `ogg` crate for the container, `opus` with libopus bundled and
-  built by cmake for the codec, so cmake is a build dependency), plus
-  the 64-bar waveform WhatsApp draws and a mono/48 kHz resampler.
-  `src/audio.rs` is the sound: `Player` plays one clip at a time through
-  rodio (OGG/Opus through `voice`, MP3/M4A/WAV through rodio's decoders,
-  decoded on a thread, the device opened on demand and released when the
-  clip ends) and `Recorder` reads the default microphone through rodio's
-  `Microphone` on a thread, keeping a loudness per 50 ms for the live bars.
-  Linux needs ALSA headers to build (`libasound2-dev` on Debian,
-  `alsa-lib` on Arch). `Action::PlayVoice/SeekVoice` drive the player from
-  the bubble; `StartRecording/CancelRecording/SendRecording` the
-  microphone from the composer (the send button is a microphone when there
-  is nothing to send); `Command::SendVoice` normalizes
-  (`voice::normalize`, quiet takes up to just under full scale, gain
-  capped), encodes and sends push-to-talk with the waveform and the reply
-  quote if one was open; `Command::MarkPlayed` sends the played receipt
-  once per incoming voice message. Own bubbles lay out right-aligned,
-  where egui turns `ui.horizontal` right to left: rows like the voice
-  player must use an explicit `Layout::left_to_right` at their own width.
-  `src/ui/picker.rs` is the emoji/GIF/sticker panel. GIF search uses the
-  key from Settings, else one baked in at build time from
-  `ZAPFAST_GIPHY_KEY` (`option_env!`); the repository carries none. The
-  phone's recently used stickers arrive in `HistorySync.recent_stickers`
-  when the device links and live in the archive's `stickers` table as raw
-  `StickerMetadata`, fetched when the picker opens; favourite stickers sync
-  through app state (`FavoriteSticker`), which whatsapp-rust does not
-  surface, so they are not shown.
-- `src/paths.rs` moves a setup left by the app's earlier name
-  (`fastsapp`, then `fastwhatsapp`) over once, so the linked device survives
-  the rename. Migration runs after the single-instance guard and outside demos;
-  keep the guard's `fastsapp:` wire identity compatible with running old copies.
-- The app outlives the window, as in Spotifast: `main` runs
-  `eframe::run_native` in a loop; closing the window with "keep running"
-  on sets `hide_intent`, the window is destroyed, and a headless loop keeps
-  calling `App::background_frame` (the link, the archive, the tray) until
-  the tray, a clicked notification, or another launch sets `wants_show`,
-  when a new window is made. `src/tray.rs` is the Linux status notifier
-  (ksni), `src/tray_native.rs` the Windows and macOS item (tray-icon; on
-  macOS made with the first window and pumped by `tray::idle` while none
-  exists). `src/single_instance.rs` holds a loopback port so a second
-  launch surfaces the first. `src/notify.rs` sends desktop notifications
-  for `Event::Incoming` (live messages from others, not history) when the
-  reader is away from that chat. macOS has no title bar: the content runs
-  to the top. `src/macos.rs` keeps native application menus alive across window
-  recreation and aligns traffic lights with the chat header. Linking retains
-  `ui::titlebar_strip`; other headers reserve horizontal space for the buttons.
-- Group delivery uses `archive::receipts`: save the recipients when filing an
-  outgoing message, record each person's receipt, then take the least advanced
-  recipient. Never promote a group from one reader, apply a receipt to earlier
-  messages, or infer a historical audience from current membership. History
-  trusts the phone's aggregate status, not a partial `user_receipt` list.
-- Private read-state writes all use the `regular_low` app-state collection.
-  `backend::read_sync` permits one at a time and backs off the whole queue after
-  failure; per-chat retry queues would repeatedly rebuild the same failed
-  collection. Pending positions stay in the archive until acknowledged. Snapshot
-  recovery and no-progress conflict detection belong to whatsapp-rust.
-- The name and icon under the phone's Linked devices come from
-  `DevicePropsOverride` in `start_bot` (`os` is the name shown, the
-  platform type picks the icon); WhatsApp reads them at pairing only, so a
-  change shows after unlinking and linking again.
-- Older history comes from the phone on demand (`Command::FetchOlder` →
-  `Client::fetch_message_history` → a `HistorySync` chunk with
-  `sync_type == ON_DEMAND`); the archive is paged first, the phone only
-  when it is exhausted.
-- Platform-specific code belongs behind `cfg` blocks; a change for one
-  platform must keep the other two compiling.
+- `src/ui/` draws and pushes `model::Action`s; `src/app.rs` applies them after the frame. Never mutate app state from inside a view except the view's own fields (composer text, search text, flags).
+- `src/backend.rs` is the UI handle to a tokio runtime on its own thread; `src/backend/worker.rs` owns the `Bot`, archive, downloads, and avatars. The sides talk only via `Command` (UI to runtime) and `Event` (runtime to UI); every event that affects the UI must wake the window through `Waker`.
+- `src/model.rs` holds app types. Views never touch protobufs; the worker translates in `classify()` and `parse_conversation()`.
+- Canonicalize every arriving `Jid` through `Worker::canonical`. A chat behind a privacy id (`@lid`) is filed under its phone number once the mapping is known.
+- `src/archive.rs` is the only copy of history (WhatsApp replays it once, at link time) and keeps each message's raw protobuf for attachment keys. It opens with SQLCipher and a random key in the OS keyring. A locked or missing key stops linking; never fall back to a disposable archive. Tests use fixtures and mock credentials only. Plaintext migration checkpoints the WAL and verifies an encrypted staging file before atomic replacement.
+- Polls use `Client::polls()`. Keep the creator identity and key in the archive (`backend/worker/polls.rs`, `archive/polls.rs`); the UI only gets counts and its own selection. Keep each voter's latest timestamp and message id, including encrypted updates whose parent has not arrived; replay must not undo a newer vote or withdrawal. Decryption runs in batches of eight with retry after reconnect. Visible polls auto-request phone history anchored after the creation message; `poll_history.rs` serializes requests and retries 30s to 15m with no UI timer. History timestamps are Unix seconds despite `Ms` in the library and wire names; do not multiply by 1,000.
+- Group delivery uses `archive::receipts`: save recipients at send time, record each receipt, show the least advanced recipient. Never promote from one reader, apply a receipt to earlier messages, or infer audience from current membership. History trusts the phone's aggregate status, not a partial `user_receipt` list.
+- Private read state uses the `regular_low` collection only. `backend::read_sync` allows one write at a time and backs off the whole queue on failure; pending positions stay in the archive until acknowledged. Snapshot recovery belongs to whatsapp-rust.
+- Group metadata comes from `groups().get_metadata`, pumped two per 5s tick (`pump_group_info`) to avoid rate limits. Back off 30s doubling, seven tries; item-not-found, forbidden, and not-authorized are final.
+- Older history is archive first, then phone on demand (`Command::FetchOlder`, `sync_type == ON_DEMAND`). Chats with a name and no messages anchor at the present with an empty message id and ask the phone on load or open.
+- A 403/404/410 download goes through `client.media_reupload().request(..)` once more before reporting "No longer on WhatsApp's servers". Download failures live in the bubble as "..., click to retry", never as toasts.
+- Attachments larger than 64 MiB are refused from metadata (`model::ATTACHMENT_DOWNLOAD_LIMIT`); auto-download checks use `attachment_too_large()`.
+- The effective attachment folder is `AppDirs::media_dir()` (Settings override, else cache). The worker validates picks (outside the cache tree), repoints archive rows by file name, and reports `Event::MediaDirChanged`; logout clears only `media_cache_dir()`, preserving custom folders.
+- Text with emoji goes through `widgets::line` / `widgets::rich_text` or `markup::layout`, never a bare `Label`. Bodies paint via `markup::paint_selectable` and single lines via `widgets::selectable_rich_text`; keep `selectable_labels` false elsewhere. Cross-message copy is rebuilt by `src/transcript.rs` in `[time, date] Name:` form; `refine` maps emoji placeholders back through each row's `placements`.
+- `src/voice.rs` is OGG/Opus codec plus 64-bar waveform and mono/48kHz resampler; `src/audio.rs` is playback/recording via rodio. `Command::SendVoice` normalizes (gain capped) and sends push-to-talk with waveform and open quote; `Command::MarkPlayed` sends the played receipt once per incoming voice message. Own right-aligned bubbles need explicit `Layout::left_to_right` for rows like the voice player.
+- `src/updates/` downloads verified GitHub releases and installs via a helper after explicit restart. Keep asset checksums, package-manager detection, startup acknowledgement, and rollback intact. Portable builds carry `packaging/zapfast-portable.txt`.
+- `src/theme/custom.rs` scans local JSON palettes off the UI thread and caches the last usable choice. New icons go in `assets/icons/` as 24px Lucide-style SVGs plus the `icons!` table entry.
+- `src/paths.rs` migrates `fastsapp` then `fastwhatsapp` dirs once, after the single-instance guard and outside demos. Keep the guard's `fastsapp:` wire identity for old copies.
+- The app outlives the window: `main` loops `eframe::run_native`, close with "keep running" sets `hide_intent` and `App::background_frame` keeps link, archive, and tray alive until tray, notification, or relaunch sets `wants_show`. `src/tray.rs` is Linux (ksni), `src/tray_native.rs` is Windows/macOS. `src/notify.rs` notifies for live `Event::Incoming` from others when away from that chat. macOS has no title bar; keep `macos.rs` menu and traffic-light handling across window recreation.
+- Platform code goes behind `cfg` or target modules; every change must keep Linux, macOS, and Windows compiling.
+- Experimental tools live in `activity.rs` (presence-only tracker, session-only) and `call_diagnostics.rs` (local-only snapshot, no network I/O, no new deps); both render on `Page::Advanced` (`ui/advanced.rs`). Never invent call, location, or presence data: use the `Unknown`/`Unavailable`/`Relayed` states.
+- `eframe` runs with vsync off in `glow_options`: a hidden Wayland window stops frame callbacks and would block ping replies, so repaints stay event-driven.
 
-Three egui pitfalls this code has already hit:
+## egui pitfalls already hit here
 
-- `consume_key(Modifiers::NONE, key)` also matches the key with Shift held
-  (egui only insists on the modifiers you ask for), so the composer
-  inspects the events itself to tell Enter from Shift+Enter.
-- `with_layout(..., Align::Center)` directly inside a vertical container
-  claims the whole available height; wrap it in `ui.horizontal`.
-- `ui.horizontal` inside a right-aligned bubble lays out right to left;
-  see `mirrored_row`. A bubble's own click target is registered before its
-  contents (from last frame's rect) so links and quotes inside win clicks.
-  The empty strip beside it is registered earlier still, before the row. A
-  double-click on either replies; the body keeps it for selecting the word.
-- `Popup::context_menu` opens on the *response's* right-click, which those
-  inner widgets take for themselves; the bubble reads the right-click from
-  the input over its own rect and opens `Popup::menu` itself, so the menu
-  comes up anywhere on the message.
+- `consume_key(Modifiers::NONE, key)` also matches with Shift held; the composer inspects events itself to separate Enter from Shift+Enter.
+- `with_layout(..., Align::Center)` inside a vertical container claims full height; wrap it in `ui.horizontal`.
+- `ui.horizontal` inside a right-aligned bubble lays out right to left; see `mirrored_row`. Register the bubble click target from last frame's rect before contents (links and quotes win), and the empty strip beside it earlier still. Double-click on either replies; the body keeps it for word selection.
+- `Popup::context_menu` binds to the inner widget's right-click, so the bubble reads right-click over its own rect and opens `Popup::menu` itself.
+
+## Verify
+
+Full checks (same as CI, run before finishing):
+
+```sh
+cargo fmt --all --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-targets
+cargo test --locked --all-targets --all-features
+RUSTDOCFLAGS='-D warnings' cargo doc --locked --all-features --no-deps
+```
+
+Focused runs:
+
+```sh
+cargo test --locked --all-targets -- <filter>
+cargo test --locked --all-targets --all-features -- <filter>
+cargo run --features demo -- --demo
+cargo run --features demo -- --demo-page login
+cargo run --features demo -- --demo-shot shot.png --demo-page chat,light
+cargo test --locked --all-targets --all-features  # includes headless layout of every screen in demo
+```
+
+Linux CI also needs the GUI deps from Setup. CI additionally compile-checks Windows arm64 (`cargo check --locked --all-targets --all-features --target aarch64-pc-windows-msvc`) and smoke-tests a macOS demo window.
 
 ## Releasing
 
-Never use em dashes in user-facing writing, including release titles, release
-notes, and agent responses. Use commas, colons, parentheses, or full stops.
+Never use em dashes in user-facing writing. Use commas, colons, parentheses, or full stops.
 
-Before writing release notes, read the previous two stable releases of
-`../spotifast` and match their style: a short plain-language summary, `New`
-and `Fixed` sections with bold user-facing results, a `Thanks` section, and
-a full-changelog link. Credit who did what on the relevant item, with issue
-or PR numbers, and acknowledge reporters separately from implementers.
-Include screenshots or short videos of the main features, especially Omarchy
-theme integration when relevant. Capture only synthetic offline demo content,
-never real chats. Verify every media link and do not leave generated notes
-in place. Describe known limitations honestly.
-
-Do not cut a release for every fix. Work accumulates on `main` until
-there is something substantial to announce: a feature, or a batch of
-fixes worth a changelog entry. Five patch releases in a day is what this
-rule exists to prevent. The exception is a regression in something just
-released, which goes out as soon as it is fixed.
-
-A release is not finished when the tag is pushed. Do these in order:
-
-1. Bump `version` in `Cargo.toml` and update `Cargo.lock` with a build. Run
-   the full checks, commit, and push before tagging so the binaries report
-   the right version.
-2. Tag `vX.Y.Z` and push the tag. Wait for every platform build, artifact,
-   and `checksums.txt`.
-3. Replace the generated GitHub notes with written release notes. Start with
-   a short summary, group user-visible changes under headings such as `New`
-   and `Fixed`, credit contributors and reporters where it helps, and end
-   with a full-changelog link comparing the previous tag. Write about what
-   changed for the user, not the commit history.
-4. After the release files exist, update both `zapfast_version` in
-   `docs/_config.yml` and the version menu in `docs/_data/versions.yml`.
-   The menu lists only the current version, which points to `/download/`,
-   and the Changelog link; do not add older versions to it. Never point the
-   download page at files that do not exist yet. Set `release_asset_prefix` to
-   `zapfast` and `release_app_name` to `ZapFast` only once those assets exist.
-5. Update the AUR packages from the templates in `packaging/arch/`. The shared
-   packaging workflow generates versions, hashes and `.SRCINFO` after the
-   release exists, and publishes when `PUBLISH_AUR` and the required secrets
-   are configured. Otherwise use `native-packages` to build, stage,
-   review and publish the generated recipes; see `PACKAGING.md`. Validate
-   native builds with `makepkg -f`. A recipe-only `zapfast-git` change does
-   not require an application release.
+- Do not release every fix. Accumulate on `main` until a feature or a batch of fixes is worth announcing. Exception: a regression in something just released goes out immediately.
+- Match the style of the previous two stable releases in this repo: short summary, `New` and `Fixed` sections with bold user results, `Thanks`, full-changelog link. Credit implementers and reporters with issue or PR numbers. Use only synthetic offline demo content for media, verify every link, describe limits honestly.
+- Steps in order: bump `version` in `Cargo.toml` and update `Cargo.lock` with a build, run full checks, commit and push; tag `vX.Y.Z` and push the tag; wait for all platform builds, artifacts, and `checksums.txt`; replace generated notes with written notes; after assets exist, update `zapfast_version` in `docs/_config.yml` and the version menu in `docs/_data/versions.yml` (current version points to `/download/` plus Changelog link, never point at missing files); update AUR from `packaging/arch/` templates and validate with `makepkg -f` (a recipe-only `zapfast-git` change needs no app release). See `PACKAGING.md` for native-package builds.
 
 ## Definition of done
 
-- Add focused tests for changed behaviour. The `demo` feature carries sample
-  data and a headless layout test of every screen (`src/demo.rs`); extend
-  the sample when a new kind of content or state is added, and use
-  `--demo-shot` to look at the result.
-- Update the README when user-visible behaviour, settings, files, or network
-  access changes.
-- Run the full checks before finishing:
-
-  ```sh
-  cargo fmt --all --check
-  cargo clippy --locked --all-targets -- -D warnings
-  cargo clippy --locked --all-targets --all-features -- -D warnings
-  cargo test --locked --all-targets
-  cargo test --locked --all-targets --all-features
-  RUSTDOCFLAGS='-D warnings' cargo doc --locked --all-features --no-deps
-  ```
-
-  Do not weaken a lint, delete a test, or add an `allow` merely to make
-  them pass without explaining why the rule does not apply.
-- Report platform coverage honestly: say what was run and what was only
-  compiled.
-- Never log message contents, phone numbers, keys, or QR payloads at a
-  level that ships. The log file is meant to be attached to bug reports.
+- Add focused tests for changed behavior. Extend `demo` sample data and headless layout coverage when adding content or states; use `--demo-shot` to inspect.
+- Update README when behavior, settings, files, or network access changes.
+- Run the full checks above. Do not weaken a lint, delete a test, or add `allow` without explaining why the rule does not apply.
+- Report platform coverage honestly (ran vs only compiled).
